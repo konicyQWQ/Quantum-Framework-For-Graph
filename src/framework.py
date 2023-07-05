@@ -126,30 +126,60 @@ class Framework(object):
 
         return circ
 
-    def run(self, max=False, seed=None, init_point=None):
+    def run(self, max=False, seed=None, init_point=None, maxiter=100):
         qc = self.__loss_qc()
         target = self.__observable(qc.num_qubits)
 
         if max == True:
             target = -target
-        if seed == None:
-            seed = np.random.randint(2147483647)
-        if init_point == None:
-            init_point = np.random.uniform(size=len(qc.parameters)) * np.pi
 
+        np.random.seed(seed)
         algorithm_globals.random_seed = seed
+        
+        if init_point == None:
+            init_point = (np.random.uniform(size=len(qc.parameters))) * np.pi
+
         qi = QuantumInstance(AerSimulator(method='statevector'),
-                             seed_transpiler=seed, seed_simulator=seed,
-                             shots=1024)
-        optim = SLSQP(maxiter=1000)
-        vqe = VQE(qc, quantum_instance=qi, initial_point=init_point,
-                  optimizer=optim)
-        obj = vqe.compute_minimum_eigenvalue(target)
+                            seed_transpiler=seed, seed_simulator=seed,
+                            shots=1024)
+        
+        answer = []
+        def calc(x):
+            new_qc = qc.bind_parameters(x)
+            result = qi.execute(new_qc)
+            return float(result.results[0].data.statevector[0].real)
+        
+        def callback(xk):
+            ans = []
+            sampled_params_dicts = sample_exact_thetas(xk, n=32, seed=np.random.randint(2147483647))
+            if self.ansatz_type == 'permutation':
+                for v in sampled_params_dicts:
+                    p = np.abs(Operator(self.ansatz_qc.bind_parameters(v)).data)
+                    p = np.round(p)
+                    cost = (self.sum_vec @ p * self.data).sum()
+                    ans.append((cost, p))
+            if self.ansatz_type == 'vertex permutation':
+                for v in sampled_params_dicts:
+                    p = np.abs(Operator(self.ansatz_qc.bind_parameters(v)).data)
+                    p = np.round(p)
+                    cost = ((p @ self.data.reshape(int(np.sqrt(self.n)), int(np.sqrt(self.n))) @ p.T).flatten() * self.sum_vec).sum()
+                    ans.append((cost, p))
+            ans.sort(key=lambda x:x[0], reverse=max)
+            answer.append(ans[0])
+            # file = open("loss.txt", "a")
+            # file.write("{}, {}\n".format(calc(xk), ans[0][0]))
+        
+        optim = SLSQP(maxiter=maxiter, callback=callback)
+        bounds = []
+        for i in range(len(qc.parameters)):
+            bounds.append((0, np.pi))
+        obj = optim.minimize(calc, init_point, bounds=bounds)
+        
+        optimal_parameters = obj.x
 
         if self.ansatz_type == 'permutation':
-            sampled_params_dicts = sample_exact_thetas(obj.optimal_parameters,
-                                                        n=32, seed=seed)
-            answer = []
+            sampled_params_dicts = sample_exact_thetas(optimal_parameters,
+                                                        n=16, seed=np.random.randint(2147483647))
             for v in sampled_params_dicts:
                 p = np.abs(Operator(self.ansatz_qc.bind_parameters(v)).data)
                 p = np.round(p)
@@ -158,9 +188,8 @@ class Framework(object):
             answer.sort(key=lambda x:x[0], reverse=max)
             return answer[0][1]
         if self.ansatz_type == 'vertex permutation':
-            sampled_params_dicts = sample_exact_thetas(obj.optimal_parameters,
-                                                        n=32, seed=seed)
-            answer = []
+            sampled_params_dicts = sample_exact_thetas(optimal_parameters,
+                                                        n=16, seed=np.random.randint(2147483647))
             for v in sampled_params_dicts:
                 p = np.abs(Operator(self.ansatz_qc.bind_parameters(v)).data)
                 p = np.round(p)
@@ -169,5 +198,4 @@ class Framework(object):
             answer.sort(key=lambda x:x[0], reverse=max)
             return answer[0][1]
         else:
-            return Operator(self.ansatz_qc.bind_parameters(obj.optimal_parameters)).data
-
+            return Operator(self.ansatz_qc.bind_parameters(optimal_parameters)).data
